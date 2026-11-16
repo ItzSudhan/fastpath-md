@@ -6,9 +6,11 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { setFlagsFromString } from 'node:v8';
 
 // A whole run lasts a fraction of a second. In that time V8's optimising compiler costs more CPU
-// than the code it produces saves, so it is switched off before the parser is loaded. The setting
-// changes only how the code is compiled, never what it computes.
+// than the code it produces saves, so it is switched off before the parser is loaded; and regular
+// expressions are compiled to machine code on first use instead of being interpreted first and
+// compiled on the second use. The settings change only how code is compiled, never what it computes.
 setFlagsFromString('--no-opt');
+setFlagsFromString('--no-regexp-tier-up');
 
 const { parse } = await import('./parse.js');
 

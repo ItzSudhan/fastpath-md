@@ -16,7 +16,7 @@ Nothing is kept between calls: every call resets the parser's state, and there i
 
 ## Runtime settings
 
-`main.ts` sets one V8 flag with `setFlagsFromString` before it loads the parser: `--no-opt`, which switches off the optimising compiler. In a run this short the compiler costs more CPU than its code saves. The flag changes how the code is compiled, never what it computes: the output is byte for byte the same with and without it. The commit "Variant A" in the history is the same parser with no runtime settings.
+`main.ts` sets two V8 flags with `setFlagsFromString` before it loads the parser: `--no-opt`, which switches off the optimising compiler (in a run this short it costs more CPU than its code saves), and `--no-regexp-tier-up`, which compiles each regular expression to machine code on first use instead of interpreting it first and compiling it on the second use. The flags change how code is compiled, never what it computes: the output is byte for byte the same with and without them. The same parser is in the history as "Variant A" with no runtime settings and as "Variant B" with `--no-opt` alone.
 
 ## Running it
 
