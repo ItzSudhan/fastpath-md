@@ -53,7 +53,11 @@ const TAG_RE = /^<!--(?:-?>|[\s\S]*?-->)|^<\/[a-zA-Z][a-zA-Z0-9-]*\s*>|^<[a-zA-Z
 const URL_RE = /^(?:mailto:[A-Za-z0-9._+-]+@[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![\w-])|xmpp:[A-Za-z0-9._+-]+@[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![\w-])(?:\/[A-Za-z0-9@.]+)?)|^((?:[hH][tT][tT][pP][sS]?|[fF][tT][pP]):\/\/|www\.)(?:[a-zA-Z0-9\-]+\.?)+[^\s<]*|^[A-Za-z0-9._+-]+(@)[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![\w-])/;
 const BACKPEDAL_RE = /(?:[^?!.,:;*_'"~()&]+|\([^)]*\)|&(?![a-zA-Z0-9]+;$)|[?!.,:;*_'"~)]+(?!$))+/;
 
-/** The rule expressions that must equal marked's, by marked's own names (checked by test/rules.mjs). */
+/**
+ * The rule expressions that must equal marked's, by marked's own names (checked by test/rules.mjs).
+ * Three of them (the block newline and text rules and the inline text rule) are kept here only as
+ * the statement of what the hand-written scanners reproduce; the parser does not execute them.
+ */
 export const __rules = {
   block: {
     blockquote: BLOCKQUOTE_RE, code: CODE_RE, def: DEF_RE, fences: FENCES_RE, heading: HEADING_RE, hr: HR_RE,
@@ -74,10 +78,8 @@ export const __rules = {
 // ---------------------------------------------------------------------------------------------
 const CR_RE = /\r\n|\r/g;
 const BLANK_LINE_RE = /^[ \t]*$/;
-const LEADING_WS_RE = /^[ \t]+/;
 const NON_SPACE_RE = /[^ ]/;
 const TAB_G_RE = /\t/g;
-const DOUBLE_BLANK_RE = /\n[ \t]*\n[ \t]*$/;
 const TASK_RE = /^\[[ xX]\][ \t]+\S/;
 const TASK_STRIP_RE = /^\[[ xX]\][ \t]+/;
 const TASK_BOX_RE = /\[[ xX]\]/;
@@ -123,6 +125,8 @@ const NL_G_RE = /\n/g;
 const BT_G_RE = /`/g;
 // Anything the inline pass has to look at: without a match the source is one run of text.
 const INLINE_SPECIAL_RE = /[\\<\[`*~_&@]| {2,}\n|[hH][tT][tT][pP]|[fF][tT][pP]:\/\/|www\.|mailto:|xmpp:/;
+// The same with the characters that are escaped in text: without a match the source is its own HTML.
+const INLINE_WORK_RE = /[\\<\[`*~_&@>"']| {2,}\n|[hH][tT][tT][pP]|[fF][tT][pP]:\/\/|www\.|mailto:|xmpp:/;
 // The constructs for which marked's text rule stops inside a run of ordinary characters.
 const URLISH_RE = /@|[hH][tT][tT][pP]|[fF][tT][pP]:\/\/|www\.|mailto:|xmpp:/;
 const URL_WORD_G_RE = /[hH][tT][tT][pP]|[fF][tT][pP]:\/\/|www\.|mailto:|xmpp:/g;
@@ -159,8 +163,6 @@ const PARA_START = new Uint8Array(128);
 const CONT_UNSAFE = new Uint8Array(128);
 // 1 for ASCII punctuation (what a backslash escapes).
 const ASCII_PUNCT = new Uint8Array(128);
-// 1 where marked's text rule stops.
-const TEXT_STOP = new Uint8Array(128);
 // 1 where the url rule can begin.
 const URL_START = new Uint8Array(128);
 // 1 for the characters that can begin a construct that ends a list item's text.
@@ -199,7 +201,6 @@ const PUNCT_SPACE = new Uint8Array(128);
   for (let c = 0; c < 33; c++) CONT_UNSAFE[c] = 1;
   for (const ch of '#>`~*+-_<=|:[0123456789') CONT_UNSAFE[ch.charCodeAt(0)] = 1;
   for (const ch of '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~') ASCII_PUNCT[ch.charCodeAt(0)] = 1;
-  for (const ch of '\\<![`*~_') TEXT_STOP[ch.charCodeAt(0)] = 1;
   for (let c = 48; c < 58; c++) URL_START[c] = 1;
   for (let c = 65; c < 91; c++) URL_START[c] = URL_START[c + 32] = 1;
   for (const ch of '._+-') URL_START[ch.charCodeAt(0)] = 1;
@@ -310,9 +311,6 @@ function expandTabs(s, col) {
     }
   }
   return out;
-}
-function expandLeading(ws) {
-  return expandTabs(ws, 0);
 }
 function firstLine(s) {
   const i = s.indexOf('\n');
@@ -812,7 +810,7 @@ function lexList(src) {
   while (off < total) {
     const e = off === 0 ? src : src.slice(off);
     let endEarly = false;
-    let itemText = '';
+    const parts = ['']; // the item's lines, joined once at the end
     m = itemRe.exec(e);
     if (m === null || (maybeHr && HR_RE.test(e))) break;
     const startOff = off;
@@ -833,7 +831,7 @@ function lexList(src) {
     } else {
       indent = line.search(NON_SPACE_RE);
       indent = indent > 4 ? 1 : indent;
-      itemText = line.slice(indent);
+      parts[0] = line.slice(indent);
       indent += width;
     }
     if (!endEarly) {
@@ -887,13 +885,13 @@ function lexList(src) {
           cut = off + indent >= lineEnd ? '' : src.slice(off + indent, lineEnd);
         }
         if (firstNon >= indent || lineBlank) {
-          itemText += '\n' + cut;
+          parts.push(cut);
         } else {
           if (blank || line.replace(TAB_G_RE, '    ').search(NON_SPACE_RE) >= 4 || fenceRe.test(line) || headRe.test(line) || htmlRe.test(line) || hrRe.test(line)) break;
           const nextLine = src.slice(off, lineEnd);
           if (!hasTab) expanded = nextLine;
           const cont = SETEXT_LINE_RE.test(nextLine) && LHEADING_RE.test(line + '\n' + nextLine) ? '    ' + expanded.replace(UP_TO_3_SPACES_RE, '') : nextLine;
-          itemText += '\n' + cont;
+          parts.push(cont);
         }
         blank = lineBlank;
         off = Math.min(total, lineEnd + 1);
@@ -905,6 +903,7 @@ function lexList(src) {
       if (endsWithBlank) loose = true;
       else if (endsWithBlankLine(itemRaw)) endsWithBlank = true;
     }
+    const itemText = parts.length === 1 ? parts[0] : parts.join('\n');
     const item = new Tok(T_TEXT, itemRaw, itemText);
     item.f = itemText.length > 2 && itemText.charCodeAt(0) === 91 && TASK_RE.test(itemText);
     items.push(item);
@@ -1137,10 +1136,28 @@ function closeAscii(tail, delim, lLength, openRun, leftBoth, sameAsPrev, limit, 
 
 // Emphasis and strong emphasis at `pos`; true with rLen, rKind (1 em, 2 strong) and rText set.
 function matchEmphasis(src, pos, rest, masked, prev, closer, bound) {
-  let m = EM_LDELIM_RE.exec(rest);
-  if (m === null || (!m[1] && !m[2] && !m[3] && !m[4])) return 0;
   const delim = rest.charCodeAt(0);
   const delimCh = rest[0];
+  // The opening delimiter rule: the run, then a character that is not white space. It tells
+  // whether that character is punctuation (other than a tilde) and, for underscores, whether
+  // it is anything else. Done by hand when that character is ASCII.
+  let nextPunct = '';
+  let underOther = false;
+  let lLength = 1;
+  while (lLength < rest.length && rest.charCodeAt(lLength) === delim) lLength++;
+  if (lLength >= rest.length) return 0;
+  const nc = rest.charCodeAt(lLength);
+  if (nc < 128) {
+    if (nc === 32 || (nc >= 9 && nc <= 13)) return 0;
+    if (ASCII_PUNCT[nc] === 1 && nc !== 126) nextPunct = rest[lLength];
+    else underOther = delim === 95;
+  } else {
+    const lm = EM_LDELIM_RE.exec(rest);
+    if (lm === null || (!lm[1] && !lm[2] && !lm[3] && !lm[4])) return 0;
+    nextPunct = lm[1] || lm[3] || '';
+    underOther = !!lm[4];
+  }
+  let m;
   const sameAsPrev = prev === delimCh;
   let l = pos;
   while (l > 0 && masked.charCodeAt(l - 1) === delim) l--;
@@ -1156,10 +1173,8 @@ function matchEmphasis(src, pos, rest, masked, prev, closer, bound) {
   const beforeIsPunct = before === '*' || before === '_' || isPunctSpace(before);
   if (l < pos) prev = before;
   const prevIsPunct = l < pos ? beforeIsPunct : isPunctSpace(prev);
-  if (m[4] && isAlnum(prev)) return 0;
-  const nextPunct = m[1] || m[3] || '';
+  if (underOther && isAlnum(prev)) return 0;
   if (!nextPunct || !prev || prevIsPunct) {
-    const lLength = codePoints(m[0]) - 1;
     let delimTotal = lLength;
     let midDelimTotal = 0;
     const openRun = pos - l + lLength;
@@ -1533,6 +1548,7 @@ function autoLinkHtml(text, href, alt) {
 
 // Renders an inline source: HTML, or the plain text of an image description when `alt` is set.
 function inline(src, alt) {
+  if (!INLINE_WORK_RE.test(src)) return src; // no markup and nothing to escape
   if (!INLINE_SPECIAL_RE.test(src)) return alt || sRaw ? src : escNE(src);
   const parenWas = sLinkParen;
   sLinkParen = parenWas && src.includes(')');
@@ -1550,6 +1566,7 @@ function inlineRun(src, alt) {
   let haveMask = false;
   let trig = -2; // the first character masking could touch (-2: not looked for, -1: none)
   let brkAt = -1; // the first two spaces before a line end at or after the cursor (-1: stale)
+  const hasAmp = src.indexOf('&') >= 0; // only then can text hold a character reference
   let cAst = -2; // -2: not looked for yet
   let cUnd = -2;
   let cDel = -2;
@@ -1751,7 +1768,7 @@ function inlineRun(src, alt) {
     const raw = src.slice(pos, end);
     if (src.charCodeAt(end - 1) !== 95) prev = src[end - 1];
     keep = true;
-    const text = sRaw ? raw : decodeNumRefs(raw);
+    const text = sRaw || !hasAmp ? raw : decodeNumRefs(raw);
     if (hasPend) pend += text;
     else {
       pend = text;
