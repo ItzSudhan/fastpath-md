@@ -247,6 +247,7 @@ class Link {
 let gLinks = new Map();
 let gQueue = [];
 let gTop = true;
+let gLastCode = 0; // written, never read: see the end of parse
 let sInLink = false;
 let sRaw = false;
 let sLinkEmitted = false;
@@ -1874,5 +1875,8 @@ export function parse(markdown) {
   const html = render(toks);
   gLinks = new Map();
   gQueue = [];
+  // Reading a character makes the engine store the string flat now, while the pieces it was
+  // built from are still young, instead of keeping the tree of pieces alive until it is written.
+  if (html.length > 0) gLastCode = html.charCodeAt(html.length - 1);
   return html;
 }
