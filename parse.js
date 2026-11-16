@@ -37,7 +37,10 @@ const BR_RE = /^( {2,}|\\)\n(?!\s*$)[ \t]*/;
 const INLINETEXT_RE = /^(?:[^a-zA-Z0-9](?=(?:mailto|xmpp):)|(`+|~+|[^`~])(?:(?=[`~])|(?= {2,}\n)|(?=[a-zA-Z0-9.!#$%&'*+\/=?_`{\|}~-]+@)|[\s\S]*?(?:(?=[\\<!\[`*~_]|\b_|[hH][tT][tT][pP][sS]?|[fF][tT][pP]:\/\/|(?<![^\s*_~(])www\.|$)|[^ ](?= {2,}\n)|[^a-zA-Z0-9](?=(?:mailto|xmpp):)|[^a-zA-Z0-9.!#$%&'*+\/=?_`{\|}~-](?=[a-zA-Z0-9.!#$%&'*+\/=?_`{\|}~-]+@))))/;
 const PUNCT_RE = /^((?![*_])[\s\p{P}\p{S}])/u;
 const BLOCKSKIP_RE = /\[(?:[^\[\]`]|(?<a>`+)[^`]+\k<a>(?!`))*?\]\((?:\\[\s\S]|[^\\\(\)]|\((?:\\[\s\S]|[^\\\(\)])*\))*\)|(?<!`)()(?<b>`+)[^`]+\k<b>(?!`)|<(?! )[^<>]*?>/g;
-const EM_LDELIM_RE = /^(?:\*+(?:((?!\*)(?!~)[\p{P}\p{S}])|([^\s*]))?)|^_+(?:((?!_)(?!~)[\p{P}\p{S}])|([^\s_]))?/u;
+// marked's blockSkip rule with its two named groups numbered (1 and 3): the same matches, but
+// a replace callback is not handed a groups object for every match (checked by test/rules.mjs).
+const BLOCKSKIP_MASK_RE = /\[(?:[^\[\]`]|(`+)[^`]+\1(?!`))*?\]\((?:\\[\s\S]|[^\\\(\)]|\((?:\\[\s\S]|[^\\\(\)])*\))*\)|(?<!`)()(`+)[^`]+\3(?!`)|<(?! )[^<>]*?>/g;
+const EM_LDELIM_RE =/^(?:\*+(?:((?!\*)(?!~)[\p{P}\p{S}])|([^\s*]))?)|^_+(?:((?!_)(?!~)[\p{P}\p{S}])|([^\s_]))?/u;
 const EM_RDELIM_AST_RE = /^[^_*]*?__[^_*]*?\*[^_*]*?(?=__)|[^*]+(?=[^*])|(?!\*)(?!~)[\p{P}\p{S}](\*+)(?=[\s]|$)|(?:[^\s\p{P}\p{S}]|~)(\*+)(?!\*)(?=(?!~)[\s\p{P}\p{S}]|$)|(?!\*)(?!~)[\s\p{P}\p{S}](\*+)(?=(?:[^\s\p{P}\p{S}]|~))|[\s](\*+)(?!\*)(?=(?!~)[\p{P}\p{S}])|(?!\*)(?!~)[\p{P}\p{S}](\*+)(?!\*)(?=(?!~)[\p{P}\p{S}])|(?:[^\s\p{P}\p{S}]|~)(\*+)(?=(?:[^\s\p{P}\p{S}]|~))/gu;
 const EM_RDELIM_UND_RE = /^[^_*]*?\*\*[^_*]*?_[^_*]*?(?=\*\*)|[^_]+(?=[^_])|(?!_)[\p{P}\p{S}](_+)(?=[\s]|$)|[^\s\p{P}\p{S}](_+)(?!_)(?=[\s\p{P}\p{S}]|$)|(?!_)[\s\p{P}\p{S}](_+)(?=[^\s\p{P}\p{S}])|[\s](_+)(?!_)(?=[\p{P}\p{S}])|(?!_)[\p{P}\p{S}](_+)(?!_)(?=[\p{P}\p{S}])/gu;
 const DEL_LDELIM_RE = /^~~?(?:((?!~)[\p{P}\p{S}])|[^\s~])/u;
@@ -72,6 +75,9 @@ export const __rules = {
     reflink: REFLINK_RE, reflinkSearch: REFLINK_SEARCH_RE, tag: TAG_RE, text: INLINETEXT_RE, url: URL_RE,
   },
 };
+
+/** Expressions derived from marked's by a stated rewrite (checked by test/rules.mjs). */
+export const __derived = { blockSkipNumbered: BLOCKSKIP_MASK_RE };
 
 // ---------------------------------------------------------------------------------------------
 // Small expressions of this parser
@@ -1011,7 +1017,7 @@ function maskSource(src) {
   if (gLinks.size > 0 && src.includes('[')) t = t.replace(REFLINK_SEARCH_RE, maskRef);
   // without a backslash only a code span that holds other backticks changes, which takes a run of two
   if (t.includes('\\') || t.includes('``')) t = t.replace(ANYPUNCT_OUTSIDE_CODE_RE, maskCode);
-  if (t.includes('`') || t.includes('<') || t.includes('](')) t = t.replace(BLOCKSKIP_RE, maskSkip);
+  if (t.includes('`') || t.includes('<') || t.includes('](')) t = t.replace(BLOCKSKIP_MASK_RE, maskSkip);
   return t;
 }
 
