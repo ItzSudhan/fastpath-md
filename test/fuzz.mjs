@@ -1,6 +1,7 @@
 // Seeded fuzzers against marked.
 //   node test/fuzz.mjs mut   [seed] [count]   mutations of generated documents and spec examples
 //   node test/fuzz.mjs dense [seed] [count]   short strings made mostly of special characters
+//   node test/fuzz.mjs url   [seed] [count]   short strings made of the parts of links and addresses
 import { diff, show, minimise, rng, examples, drawDocuments } from './lib.mjs';
 
 const mode = process.argv[2] ?? 'mut';
@@ -89,6 +90,16 @@ function dense() {
   return s;
 }
 
+const URL_PARTS = ['www.', 'http', 'https://', 'ftp://', 'HTTP://', 'hTtPs://', 'mailto:', 'xmpp:', '@', '@', 'a', 'b.c', '.', '.', ' ', ' ',
+  '  \n', '\n', '*', '_', '~', '(', ')', '<', '>', '[', ']', '`', '!', '-', '+', 'x', 'm', 'w', 'h', 'f', 't', 'p', ':', '/', '&', ';', '#',
+  'é', ' ', 'com', '1', '?', ',', "'", '"', 'a@b.co', 'www.a.b', 'http://a.b/c?d=e&f', 'ww', 'ft', 'htt', '\\', '\t', '=', '{', '|', '}'];
+function urls() {
+  const n = 1 + rand.int(25);
+  let s = '';
+  for (let i = 0; i < n; i++) s += rand.pick(URL_PARTS);
+  return s;
+}
+
 let pool = [];
 if (mode === 'mut') {
   const docs = await drawDocuments(1000 + seed, 6);
@@ -107,7 +118,7 @@ if (mode === 'mut') {
 let bad = 0;
 let skipped = 0;
 for (let i = 0; i < count; i++) {
-  const md = mode === 'mut' ? mutate(rand.pick(pool), pool) : dense();
+  const md = mode === 'mut' ? mutate(rand.pick(pool), pool) : mode === 'url' ? urls() : dense();
   let d;
   try {
     d = diff(md);
