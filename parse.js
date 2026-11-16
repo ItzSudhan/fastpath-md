@@ -112,6 +112,7 @@ const ESC_NE_G_RE = /[<>"']|&(?!(#\d{1,7}|#[Xx][a-fA-F0-9]{1,6}|\w+);)/g;
 const NUMREF_RE = /&#(?:(\d{1,7})|[Xx]([A-Fa-f0-9]{1,6}));/;
 const NUMREF_OR_AMP_RE = /&#(?:(\d{1,7})|[Xx]([A-Fa-f0-9]{1,6}));|&(?!(#\d{1,7}|#[Xx][a-fA-F0-9]{1,6}|\w+);)/g;
 const PERCENT25_RE = /%25/g;
+const SAFE_URL_RE = /^[A-Za-z0-9\-_.!~*'();\/?:@&=+$,#]*$/;
 const OUTPUT_LINK_RE = /\\([\[\]])/g;
 const START_A_RE = /^<a /i;
 const END_A_RE = /^<\/a>/i;
@@ -162,8 +163,22 @@ const ITEM_MARKER = new Uint8Array(128);
 // 1 for letters and digits; 1 for the characters of an e-mail address's local part.
 const ALNUM = new Uint8Array(128);
 const EMAIL_CH = new Uint8Array(128);
+// What a character means to the text scanners: 0 nothing, 1 the text rule stops, 2 a space,
+// 3 h, 4 f, 5 w, 6 m or x (the starts of url-like constructs), 7 an at sign.
+const TEXT_CLASS = new Uint8Array(128);
+// 1 for ASCII white space and punctuation other than * and _ (marked's punctuation rule).
+const PUNCT_SPACE = new Uint8Array(128);
 {
   for (const ch of '`~#<>*+-_0123456789') ITEM_MARKER[ch.charCodeAt(0)] = 1;
+  for (const ch of '\\<![`*~_') TEXT_CLASS[ch.charCodeAt(0)] = 1;
+  TEXT_CLASS[32] = 2;
+  TEXT_CLASS[104] = TEXT_CLASS[72] = 3;
+  TEXT_CLASS[102] = TEXT_CLASS[70] = 4;
+  TEXT_CLASS[119] = 5;
+  TEXT_CLASS[109] = TEXT_CLASS[120] = 6;
+  TEXT_CLASS[64] = 7;
+  for (const c of [9, 10, 11, 12, 13, 32]) PUNCT_SPACE[c] = 1;
+  for (const ch of '!"#$%&\'()+,-./:;<=>?@[\\]^`{|}~') PUNCT_SPACE[ch.charCodeAt(0)] = 1;
   for (let c = 48; c < 58; c++) ALNUM[c] = EMAIL_CH[c] = 1;
   for (let c = 65; c < 91; c++) ALNUM[c] = ALNUM[c + 32] = EMAIL_CH[c] = EMAIL_CH[c + 32] = 1;
   for (const ch of ".!#$%&'*+/=?_`{|}~-") EMAIL_CH[ch.charCodeAt(0)] = 1;
@@ -247,6 +262,8 @@ function decodeNumRefs(s) {
   return NUMREF_RE.test(s) ? s.replace(NUMREF_OR_AMP_RE, numRefRepl) : s;
 }
 function cleanUrl(href) {
+  // encodeURI leaves these characters alone, and none of them is a percent sign
+  if (SAFE_URL_RE.test(href)) return href;
   try {
     return encodeURI(href).replace(PERCENT25_RE, '%');
   } catch {
@@ -407,8 +424,31 @@ function blockTokens(src, toks, lazy) {
   const len = src.length;
   let pos = 0;
   while (pos < len) {
-    const c = src.charCodeAt(pos);
-    if (c > 127 || PARA_START[c] === 1) {
+    let c = src.charCodeAt(pos);
+    let ws = false;
+    if (c === 32 || c === 9 || c === 10) {
+      const end = scanBlankLines(src, pos, len);
+      if (end > pos) {
+        if (end - pos === 1 && toks.length > 0) toks[toks.length - 1].raw += '\n';
+        else toks.push(new Tok(T_SPACE, src.slice(pos, end), ''));
+        pos = end;
+        continue;
+      }
+      // one to three spaces before a character leave the choice of rules to that character
+      ws = true;
+      if (c === 32) {
+        let p = pos + 1;
+        while (p < len && p - pos < 4 && src.charCodeAt(p) === 32) p++;
+        if (p - pos < 4 && p < len) {
+          const d = src.charCodeAt(p);
+          if (d !== 9 && d !== 10) {
+            c = d;
+            ws = false;
+          }
+        }
+      }
+    }
+    if (!ws && (c > 127 || PARA_START[c] === 1)) {
       const end = scanPlainLines(src, pos, len);
       if (end >= 0) {
         const chunk = src.slice(pos, end);
@@ -423,17 +463,8 @@ function blockTokens(src, toks, lazy) {
       }
     }
     const rest = pos === 0 ? src : src.slice(pos);
-    const ws = c === 32 || c === 9 || c === 10;
     let m;
     if (ws) {
-      m = NEWLINE_RE.exec(rest);
-      if (m !== null && m[0].length > 0) {
-        const raw = m[0];
-        pos += raw.length;
-        if (raw.length === 1 && toks.length > 0) toks[toks.length - 1].raw += '\n';
-        else toks.push(new Tok(T_SPACE, raw, ''));
-        continue;
-      }
       m = CODE_RE.exec(rest);
       if (m !== null) {
         const raw = trimTrailingBlankLines(m[0]);
@@ -534,7 +565,7 @@ function blockTokens(src, toks, lazy) {
         continue;
       }
     }
-    {
+    if (delimiterRowFollows(src, pos, len)) {
       const tok = lexTable(rest);
       if (tok !== null) {
         toks.push(tok);
@@ -566,21 +597,51 @@ function blockTokens(src, toks, lazy) {
         continue;
       }
     }
-    m = BLOCKTEXT_RE.exec(rest);
-    if (m !== null) {
-      pushText(toks, m[0]);
-      pos += m[0].length;
-      continue;
+    {
+      // marked's block text rule: the rest of the line
+      const nl = src.indexOf('\n', pos);
+      const end = nl < 0 ? len : nl;
+      pushText(toks, src.slice(pos, end));
+      pos = end;
     }
-    throw new Error('Infinite loop on byte: ' + c);
   }
   gTop = true;
   return toks;
 }
 
+// The end of the blank lines that start at `pos` (marked's newline rule), or `pos` when the line
+// there is not blank. Blanks that run to the end of the input count as a blank line.
+function scanBlankLines(src, pos, len) {
+  let end = pos;
+  let p = pos;
+  while (p < len) {
+    let q = p;
+    let c = 0;
+    while (q < len && ((c = src.charCodeAt(q)) === 32 || c === 9)) q++;
+    if (q >= len) return len;
+    if (c !== 10) break;
+    end = q + 1;
+    p = end;
+  }
+  return end;
+}
+
+// Whether the line after the one at `pos` could be a table's delimiter row.
+function delimiterRowFollows(src, pos, len) {
+  const nl = src.indexOf('\n', pos);
+  if (nl < 0) return false;
+  let p = nl + 1;
+  let n = 0;
+  while (p < len && n < 3 && src.charCodeAt(p) === 32) {
+    p++;
+    n++;
+  }
+  if (p >= len) return false;
+  const c = src.charCodeAt(p);
+  return c === 124 || c === 58 || c === 45;
+}
+
 function lexTable(rest) {
-  const nl = rest.indexOf('\n');
-  if (nl < 0) return null;
   const m = TABLE_RE.exec(rest);
   if (m === null || !TABLE_DELIM_RE.test(m[2])) return null;
   const heads = splitCells(m[1], 0);
@@ -908,7 +969,8 @@ function linkInText(s) {
 function maskSource(src) {
   let t = src;
   if (gLinks.size > 0 && src.includes('[')) t = t.replace(REFLINK_SEARCH_RE, maskRef);
-  if (t.includes('\\') || t.includes('`')) t = t.replace(ANYPUNCT_OUTSIDE_CODE_RE, maskCode);
+  // without a backslash only a code span that holds other backticks changes, which takes a run of two
+  if (t.includes('\\') || t.includes('``')) t = t.replace(ANYPUNCT_OUTSIDE_CODE_RE, maskCode);
   if (t.includes('`') || t.includes('<') || t.includes('](')) t = t.replace(BLOCKSKIP_RE, maskSkip);
   return t;
 }
@@ -951,6 +1013,19 @@ function firstPointLen(s) {
   return 1;
 }
 
+// marked's punctuation rule (white space or punctuation, but not * or _) on the start of `s`.
+function isPunctSpace(s) {
+  if (s.length === 0) return false;
+  const c = s.charCodeAt(0);
+  return c < 128 ? PUNCT_SPACE[c] === 1 : PUNCT_RE.test(s);
+}
+// Whether `s` (one character, or none) holds a letter or a digit.
+function isAlnum(s) {
+  if (s.length === 0) return false;
+  const c = s.charCodeAt(0);
+  return c < 128 ? ALNUM[c] === 1 : ALNUM_U_RE.test(s);
+}
+
 // Emphasis and strong emphasis at `pos`; true with rLen, rKind (1 em, 2 strong) and rText set.
 function matchEmphasis(src, pos, rest, masked, prev, closer) {
   let m = EM_LDELIM_RE.exec(rest);
@@ -969,10 +1044,10 @@ function matchEmphasis(src, pos, rest, masked, prev, closer) {
       if (lo >= 0xdc00 && lo <= 0xdfff && hi >= 0xd800 && hi <= 0xdbff) before = masked.slice(l - 2, l);
     }
   }
-  const beforeIsPunct = before === '*' || before === '_' || PUNCT_RE.test(before);
+  const beforeIsPunct = before === '*' || before === '_' || isPunctSpace(before);
   if (l < pos) prev = before;
-  const prevIsPunct = l < pos ? beforeIsPunct : PUNCT_RE.test(prev);
-  if (m[4] && ALNUM_U_RE.test(prev)) return false;
+  const prevIsPunct = l < pos ? beforeIsPunct : isPunctSpace(prev);
+  if (m[4] && isAlnum(prev)) return false;
   const nextPunct = m[1] || m[3] || '';
   if (!nextPunct || !prev || prevIsPunct) {
     const lLength = codePoints(m[0]) - 1;
@@ -1018,11 +1093,23 @@ function matchEmphasis(src, pos, rest, masked, prev, closer) {
   return false;
 }
 
+// Whether the underscores at `pos` sit between two ASCII letters or digits: the character before
+// them (`before`, the end of the text just read) and the one after. marked gives up on those
+// right after matching the opening delimiter, so nothing else needs to be worked out.
+function wordUnderscore(src, pos, len, before) {
+  if (!(before < 128 && ALNUM[before] === 1) || src.charCodeAt(pos - 1) !== before) return false;
+  let r = pos + 1;
+  while (r < len && src.charCodeAt(r) === 95) r++;
+  if (r >= len) return false;
+  const after = src.charCodeAt(r);
+  return after < 128 && ALNUM[after] === 1;
+}
+
 // Strikethrough at `pos`; true with rLen and rText set.
 function matchDel(src, pos, rest, masked, prev, closer) {
   let m = DEL_LDELIM_RE.exec(rest);
   if (m === null) return false;
-  if (!(m[1] || '') || !prev || PUNCT_RE.test(prev)) {
+  if (!(m[1] || '') || !prev || isPunctSpace(prev)) {
     const lLength = codePoints(m[0]) - 1;
     let delimTotal = lLength;
     const start = pos + lLength;
@@ -1172,13 +1259,16 @@ function scanText(src, pos, len) {
   const d = src.charCodeAt(j);
   if (d === 96 || d === 126) return j;
   if (d === 32 && hardBreakAt(src, j, len)) return j;
-  for (;;) {
-    if (j >= len) return len;
-    const k = src.charCodeAt(j);
-    if (k < 128 && TEXT_STOP[k] === 1) return j;
-    if (k !== 32 && j + 2 < len && src.charCodeAt(j + 1) === 32 && src.charCodeAt(j + 2) === 32 && hardBreakAt(src, j + 1, len)) return j + 1;
-    j++;
+  for (let k = j; k < len; k++) {
+    const ch = src.charCodeAt(k);
+    if (ch >= 128) continue;
+    const cls = TEXT_CLASS[ch];
+    if (cls === 0 || cls > 2) continue;
+    if (cls === 1) return k;
+    // a space: a hard break starts here when the character before is not a space
+    if (k > j && k + 2 < len && src.charCodeAt(k + 1) === 32 && src.charCodeAt(k - 1) !== 32 && hardBreakAt(src, k, len)) return k;
   }
+  return len;
 }
 // The same for sources that may hold extended autolinks: the text also stops before "http",
 // "ftp://", a "www." after white space or one of *_~( , "mailto:" or "xmpp:" after a character
@@ -1194,30 +1284,46 @@ function scanTextUrl(src, pos, len) {
   const d = src.charCodeAt(j);
   if (d === 96 || d === 126) return j;
   if (d === 32 && hardBreakAt(src, j, len)) return j;
+  // `stop`: where the run of address characters before the next "@" starts (-1: none ahead)
+  let stop = -1;
   let at = src.indexOf('@', j);
-  let run = at < 0 ? -1 : addressStart(src, at);
-  if (at >= 0 && run <= j && j < at) return j;
-  for (let k = j; ; k++) {
-    if (k >= len) return len;
+  if (at >= 0) {
+    const run = addressStart(src, at);
+    if (run <= j) {
+      if (j < at) return j;
+    } else if (run < at) stop = run;
+  }
+  for (let k = j; k < len; k++) {
+    if (k === stop) return k;
     const ch = src.charCodeAt(k);
-    if (ch < 128) {
-      if (TEXT_STOP[ch] === 1) return k;
-      if (ch === 104 || ch === 72) {
-        if (k + 3 < len && (src.charCodeAt(k + 1) | 32) === 116 && (src.charCodeAt(k + 2) | 32) === 116 && (src.charCodeAt(k + 3) | 32) === 112) return k;
-      } else if (ch === 102 || ch === 70) {
-        if (k + 5 < len && (src.charCodeAt(k + 1) | 32) === 116 && (src.charCodeAt(k + 2) | 32) === 112 && src.charCodeAt(k + 3) === 58 && src.charCodeAt(k + 4) === 47 && src.charCodeAt(k + 5) === 47) return k;
-      } else if (ch === 119) {
-        if (src.startsWith('www.', k) && wwwBoundary(src.charCodeAt(k - 1))) return k;
+    if (ch >= 128) continue;
+    const cls = TEXT_CLASS[ch];
+    if (cls === 0) continue;
+    if (cls === 1) return k;
+    if (cls === 2) {
+      if (k > j && k + 2 < len && src.charCodeAt(k + 1) === 32 && src.charCodeAt(k - 1) !== 32 && hardBreakAt(src, k, len)) return k;
+    } else if (cls === 3) {
+      if (k + 3 < len && (src.charCodeAt(k + 1) | 32) === 116 && (src.charCodeAt(k + 2) | 32) === 116 && (src.charCodeAt(k + 3) | 32) === 112) return k;
+    } else if (cls === 4) {
+      if (k + 5 < len && (src.charCodeAt(k + 1) | 32) === 116 && (src.charCodeAt(k + 2) | 32) === 112 && src.charCodeAt(k + 3) === 58 && src.charCodeAt(k + 4) === 47 && src.charCodeAt(k + 5) === 47) return k;
+    } else if (cls === 5) {
+      if (src.startsWith('www.', k) && wwwBoundary(src.charCodeAt(k - 1))) return k;
+    } else if (cls === 6) {
+      if (k > j && schemeAt(src, k, len)) {
+        const b = src.charCodeAt(k - 1);
+        if (!(b < 128 && ALNUM[b] === 1)) return k;
+      }
+    } else {
+      // an "@": look for the next one
+      stop = -1;
+      at = src.indexOf('@', k + 1);
+      if (at >= 0) {
+        const run = addressStart(src, at);
+        if (run < at) stop = run;
       }
     }
-    if (ch !== 32 && k + 2 < len && src.charCodeAt(k + 1) === 32 && src.charCodeAt(k + 2) === 32 && hardBreakAt(src, k + 1, len)) return k + 1;
-    if (!(ch < 128 && ALNUM[ch] === 1) && schemeAt(src, k + 1, len)) return k + 1;
-    if (ch === 64) {
-      at = src.indexOf('@', k + 1);
-      run = at < 0 ? -1 : addressStart(src, at);
-    }
-    if (at >= 0 && run === k + 1 && run < at) return k + 1;
   }
+  return len;
 }
 // Whether "mailto:" or "xmpp:" starts at `p`.
 function schemeAt(src, p, len) {
@@ -1342,23 +1448,27 @@ function inlineRun(src, alt) {
         }
       }
     } else if (c === 42 || c === 95) {
-      if (!haveMask) {
-        masked = maskSource(src);
-        haveMask = true;
-      }
-      let closer;
-      if (c === 42) {
-        if (cAst === -2) cAst = lastCloser(masked, 42, '*');
-        closer = cAst;
+      if (c === 95 && prev.length === 1 && wordUnderscore(src, pos, len, prev.charCodeAt(0))) {
+        // an underscore inside a word never opens emphasis
       } else {
-        if (cUnd === -2) cUnd = lastCloser(masked, 95, '_');
-        closer = cUnd;
-      }
-      if (matchEmphasis(src, pos, src.slice(pos), masked, prev, closer)) {
-        const kind = rKind;
-        adv = rLen;
-        const inner = inline(rText, alt);
-        piece = alt ? inner : kind === 1 ? '<em>' + inner + '</em>' : '<strong>' + inner + '</strong>';
+        if (!haveMask) {
+          masked = maskSource(src);
+          haveMask = true;
+        }
+        let closer;
+        if (c === 42) {
+          if (cAst === -2) cAst = lastCloser(masked, 42, '*');
+          closer = cAst;
+        } else {
+          if (cUnd === -2) cUnd = lastCloser(masked, 95, '_');
+          closer = cUnd;
+        }
+        if (matchEmphasis(src, pos, src.slice(pos), masked, prev, closer)) {
+          const kind = rKind;
+          adv = rLen;
+          const inner = inline(rText, alt);
+          piece = alt ? inner : kind === 1 ? '<em>' + inner + '</em>' : '<strong>' + inner + '</strong>';
+        }
       }
     } else if (c === 96) {
       const m = CODESPAN_RE.exec(src.slice(pos));
