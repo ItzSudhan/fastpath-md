@@ -126,6 +126,8 @@ const INLINE_SPECIAL_RE = /[\\<\[`*~_&@]| {2,}\n|[hH][tT][tT][pP]|[fF][tT][pP]:\
 // The constructs for which marked's text rule stops inside a run of ordinary characters.
 const URLISH_RE = /@|[hH][tT][tT][pP]|[fF][tT][pP]:\/\/|www\.|mailto:|xmpp:/;
 const URL_WORD_G_RE = /[hH][tT][tT][pP]|[fF][tT][pP]:\/\/|www\.|mailto:|xmpp:/g;
+// The characters marked's text rule stops at.
+const TEXT_STOP_G_RE = /[\\<!\[`*~_]/g;
 // The characters at which one of the masking passes can start a match.
 const MASK_TRIGGER_RE = /[\[<`\\]/;
 
@@ -262,6 +264,7 @@ function numRefRepl(whole, dec, hex) {
   return v === 38 ? '&amp;' : String.fromCodePoint(v);
 }
 function decodeNumRefs(s) {
+  if (s.indexOf('&') < 0) return s;
   return NUMREF_RE.test(s) ? s.replace(NUMREF_OR_AMP_RE, numRefRepl) : s;
 }
 function cleanUrl(href) {
@@ -834,8 +837,17 @@ function lexList(src) {
         const lead = p - off;
         const onlyBlanks = p === lineEnd;
         if (!onlyBlanks && !hasTab && lead <= 3 && fc < 128 && ITEM_MARKER[fc] === 1) {
+          // only the constructs that begin with this character can end the item here
           const nextLine = src.slice(off, lineEnd);
-          if (fenceRe.test(nextLine) || headRe.test(nextLine) || htmlRe.test(nextLine) || bqRe.test(nextLine) || nextBullet.test(nextLine) || hrRe.test(nextLine)) break;
+          let ends;
+          if (fc === 45 || fc === 42) ends = nextBullet.test(nextLine) || hrRe.test(nextLine);
+          else if (fc === 43 || (fc >= 48 && fc <= 57)) ends = nextBullet.test(nextLine);
+          else if (fc === 96 || fc === 126) ends = fenceRe.test(nextLine);
+          else if (fc === 35) ends = headRe.test(nextLine);
+          else if (fc === 60) ends = htmlRe.test(nextLine);
+          else if (fc === 62) ends = bqRe.test(nextLine);
+          else ends = hrRe.test(nextLine);
+          if (ends) break;
         }
         const lineBlank = onlyBlanks ? true : fc > 32 && fc < 128 ? false : !src.slice(off, lineEnd).trim();
         let cut; // the line without the item's indentation
@@ -869,7 +881,7 @@ function lexList(src) {
       else if (endsWithBlankLine(itemRaw)) endsWithBlank = true;
     }
     const item = new Tok(T_TEXT, itemRaw, itemText);
-    item.f = itemText.charCodeAt(0) === 91 && TASK_RE.test(itemText);
+    item.f = itemText.length > 2 && itemText.charCodeAt(0) === 91 && TASK_RE.test(itemText);
     items.push(item);
   }
   if (items.length === 0) return null;
@@ -1269,7 +1281,8 @@ function matchReflink(rest, alt) {
 }
 
 // The end of the text run that starts at `pos`, for sources without url-like constructs.
-function scanText(src, pos, len) {
+// `brk` is the position of the first two spaces before a line end at or after `pos`, or past the end.
+function scanText(src, pos, len, brk) {
   const c = src.charCodeAt(pos);
   let j = pos + 1;
   if (c === 96 || c === 126) {
@@ -1279,16 +1292,19 @@ function scanText(src, pos, len) {
   const d = src.charCodeAt(j);
   if (d === 96 || d === 126) return j;
   if (d === 32 && hardBreakAt(src, j, len)) return j;
-  for (let k = j; k < len; k++) {
-    const ch = src.charCodeAt(k);
-    if (ch >= 128) continue;
-    const cls = TEXT_CLASS[ch];
-    if (cls === 0 || cls > 2) continue;
-    if (cls === 1) return k;
-    // a space: a hard break starts here when the character before is not a space
-    if (k > j && k + 2 < len && src.charCodeAt(k + 1) === 32 && src.charCodeAt(k - 1) !== 32 && hardBreakAt(src, k, len)) return k;
+  // the next character the text rule stops at
+  TEXT_STOP_G_RE.lastIndex = j;
+  const e = TEXT_STOP_G_RE.test(src) ? TEXT_STOP_G_RE.lastIndex - 1 : len;
+  if (brk < e) {
+    // a hard break before it: the text ends where its spaces start (one right at `j` was
+    // just ruled out, so those spaces follow a character that is not a space)
+    let p = brk >= j ? brk : src.indexOf('  \n', j);
+    if (p >= 0 && p < e) {
+      while (p > j && src.charCodeAt(p - 1) === 32) p--;
+      return p;
+    }
   }
-  return len;
+  return e;
 }
 // The same for sources that may hold extended autolinks: the text also stops before "http",
 // "ftp://", a "www." after white space or one of *_~( , "mailto:" or "xmpp:" after a character
@@ -1381,6 +1397,16 @@ function wwwBoundary(code) {
   if (code === 42 || code === 95 || code === 126 || code === 40 || code === 32 || (code >= 9 && code <= 13)) return true;
   return code > 127 && WS_CHAR_RE.test(String.fromCharCode(code));
 }
+// Where the first two spaces directly before a line end start, at or after `pos`; past the
+// end when there are none.
+function nextBreak(src, pos, len) {
+  let nl = src.indexOf('\n', pos + 2);
+  while (nl >= 0) {
+    if (src.charCodeAt(nl - 1) === 32 && src.charCodeAt(nl - 2) === 32) return nl - 2;
+    nl = src.indexOf('\n', nl + 1);
+  }
+  return len + 1;
+}
 // Whether two or more spaces and then a line end start at `j`.
 function hardBreakAt(src, j, len) {
   let k = j;
@@ -1414,6 +1440,7 @@ function inlineRun(src, alt) {
   let masked = '';
   let haveMask = false;
   let trig = -2; // the first character masking could touch (-2: not looked for, -1: none)
+  let brkAt = -1; // the first two spaces before a line end at or after the cursor (-1: stale)
   let cAst = -2; // -2: not looked for yet
   let cUnd = -2;
   let cDel = -2;
@@ -1606,7 +1633,8 @@ function inlineRun(src, alt) {
     if (urlAt < pos) urlAt = nextUrlish(src, pos, len);
     let end;
     if (urlAt > pos) {
-      end = scanText(src, pos, len);
+      if (brkAt < pos) brkAt = nextBreak(src, pos, len);
+      end = scanText(src, pos, len, brkAt);
       if (end >= urlAt) end = scanTextUrl(src, pos, len);
     } else {
       end = scanTextUrl(src, pos, len);
