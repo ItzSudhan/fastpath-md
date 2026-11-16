@@ -125,6 +125,9 @@ const BT_G_RE = /`/g;
 const INLINE_SPECIAL_RE = /[\\<\[`*~_&@]| {2,}\n|[hH][tT][tT][pP]|[fF][tT][pP]:\/\/|www\.|mailto:|xmpp:/;
 // The constructs for which marked's text rule stops inside a run of ordinary characters.
 const URLISH_RE = /@|[hH][tT][tT][pP]|[fF][tT][pP]:\/\/|www\.|mailto:|xmpp:/;
+const URL_WORD_G_RE = /[hH][tT][tT][pP]|[fF][tT][pP]:\/\/|www\.|mailto:|xmpp:/g;
+// The characters at which one of the masking passes can start a match.
+const MASK_TRIGGER_RE = /[\[<`\\]/;
 
 function listItemRe(bull) {
   return new RegExp(`^( {0,3}${bull})((?:[\t ][^\\n]*)?(?:\\n|$))`);
@@ -1027,9 +1030,9 @@ function isAlnum(s) {
 }
 
 // Emphasis and strong emphasis at `pos`; true with rLen, rKind (1 em, 2 strong) and rText set.
-function matchEmphasis(src, pos, rest, masked, prev, closer) {
+function matchEmphasis(src, pos, rest, masked, prev, closer, bound) {
   let m = EM_LDELIM_RE.exec(rest);
-  if (m === null || (!m[1] && !m[2] && !m[3] && !m[4])) return false;
+  if (m === null || (!m[1] && !m[2] && !m[3] && !m[4])) return 0;
   const delim = rest.charCodeAt(0);
   const delimCh = rest[0];
   const sameAsPrev = prev === delimCh;
@@ -1047,7 +1050,7 @@ function matchEmphasis(src, pos, rest, masked, prev, closer) {
   const beforeIsPunct = before === '*' || before === '_' || isPunctSpace(before);
   if (l < pos) prev = before;
   const prevIsPunct = l < pos ? beforeIsPunct : isPunctSpace(prev);
-  if (m[4] && isAlnum(prev)) return false;
+  if (m[4] && isAlnum(prev)) return 0;
   const nextPunct = m[1] || m[3] || '';
   if (!nextPunct || !prev || prevIsPunct) {
     const lLength = codePoints(m[0]) - 1;
@@ -1057,8 +1060,17 @@ function matchEmphasis(src, pos, rest, masked, prev, closer) {
     const leftBoth = !!before.trim() && (!!nextPunct || (delim === 42 && !beforeIsPunct));
     const re = delim === 42 ? EM_RDELIM_AST_RE : EM_RDELIM_UND_RE;
     const start = pos + lLength;
-    if (closer < start) return false;
-    const tail = masked.slice(start);
+    const bounded = bound < masked.length;
+    if (closer < start) return bounded ? 2 : 0;
+    let tail;
+    if (bounded) {
+      // only the text before the first maskable character, and before the other delimiter
+      tail = masked.slice(start, bound);
+      const other = tail.indexOf(delim === 42 ? '_' : '*');
+      if (other >= 0) tail = tail.slice(0, other);
+    } else {
+      tail = masked.slice(start);
+    }
     const limit = closer - start;
     re.lastIndex = 0;
     while ((m = re.exec(tail)) !== null && !(m.index > limit)) {
@@ -1077,8 +1089,11 @@ function matchEmphasis(src, pos, rest, masked, prev, closer) {
       }
       delimTotal -= rLength;
       if (delimTotal > 0) continue;
+      const head = m.index + firstPointLen(m[0]);
+      // within a bound, the character after the closing run must have been seen
+      if (bounded && head + rLength >= tail.length) return 2;
       rLength = Math.min(rLength, rLength + delimTotal + midDelimTotal);
-      const raw = rest.slice(0, lLength + m.index + firstPointLen(m[0]) + rLength);
+      const raw = rest.slice(0, lLength + head + rLength);
       rLen = raw.length;
       if (Math.min(lLength, rLength) % 2) {
         rKind = 1;
@@ -1087,10 +1102,11 @@ function matchEmphasis(src, pos, rest, masked, prev, closer) {
         rKind = 2;
         rText = raw.slice(2, -2);
       }
-      return true;
+      return 1;
     }
+    return bounded ? 2 : 0;
   }
-  return false;
+  return 0;
 }
 
 // Whether the underscores at `pos` sit between two ASCII letters or digits: the character before
@@ -1106,15 +1122,16 @@ function wordUnderscore(src, pos, len, before) {
 }
 
 // Strikethrough at `pos`; true with rLen and rText set.
-function matchDel(src, pos, rest, masked, prev, closer) {
+function matchDel(src, pos, rest, masked, prev, closer, bound) {
   let m = DEL_LDELIM_RE.exec(rest);
-  if (m === null) return false;
+  if (m === null) return 0;
   if (!(m[1] || '') || !prev || isPunctSpace(prev)) {
     const lLength = codePoints(m[0]) - 1;
     let delimTotal = lLength;
     const start = pos + lLength;
-    if (closer < start) return false;
-    const tail = masked.slice(start);
+    const bounded = bound < masked.length;
+    if (closer < start) return bounded ? 2 : 0;
+    const tail = bounded ? masked.slice(start, bound) : masked.slice(start);
     const limit = closer - start;
     const re = DEL_RDELIM_RE;
     re.lastIndex = 0;
@@ -1129,14 +1146,17 @@ function matchDel(src, pos, rest, masked, prev, closer) {
       }
       delimTotal -= rLength;
       if (delimTotal > 0) continue;
+      const head = m.index + firstPointLen(m[0]);
+      if (bounded && head + rLength >= tail.length) return 2;
       rLength = Math.min(rLength, rLength + delimTotal);
-      const raw = rest.slice(0, lLength + m.index + firstPointLen(m[0]) + rLength);
+      const raw = rest.slice(0, lLength + head + rLength);
       rLen = raw.length;
       rText = raw.slice(lLength, -lLength);
-      return true;
+      return 1;
     }
+    return bounded ? 2 : 0;
   }
-  return false;
+  return 0;
 }
 
 // Whether an HTML tag or autolink that starts inside a link label runs past its end.
@@ -1325,6 +1345,21 @@ function scanTextUrl(src, pos, len) {
   }
   return len;
 }
+// The first position at or after `pos` where a url-like construct starts: one of the words the
+// text rule stops at, or the run of address characters before the next "@" (clamped to `pos`).
+// Past the end when there is none.
+function nextUrlish(src, pos, len) {
+  URL_WORD_G_RE.lastIndex = pos;
+  const m = URL_WORD_G_RE.exec(src);
+  let first = m === null ? len + 1 : m.index;
+  const at = src.indexOf('@', pos);
+  if (at >= 0) {
+    const s = addressStart(src, at);
+    const v = s < pos ? pos : s;
+    if (v < first) first = v;
+  }
+  return first;
+}
 // Whether "mailto:" or "xmpp:" starts at `p`.
 function schemeAt(src, p, len) {
   if (p >= len) return false;
@@ -1373,9 +1408,12 @@ function inline(src, alt) {
 
 function inlineRun(src, alt) {
   const len = src.length;
-  const urlish = URLISH_RE.test(src);
+  // The first position at or after the cursor where an extended autolink could start or stop
+  // the text: -1 when it has to be looked for, past the end when there is none.
+  let urlAt = URLISH_RE.test(src) ? -1 : len + 1;
   let masked = '';
   let haveMask = false;
+  let trig = -2; // the first character masking could touch (-2: not looked for, -1: none)
   let cAst = -2; // -2: not looked for yet
   let cUnd = -2;
   let cDel = -2;
@@ -1451,19 +1489,36 @@ function inlineRun(src, alt) {
       if (c === 95 && prev.length === 1 && wordUnderscore(src, pos, len, prev.charCodeAt(0))) {
         // an underscore inside a word never opens emphasis
       } else {
+        const rest = src.slice(pos);
+        let res = 2;
         if (!haveMask) {
-          masked = maskSource(src);
-          haveMask = true;
+          if (trig === -2) {
+            trig = src.search(MASK_TRIGGER_RE);
+            if (trig < 0) {
+              // nothing to mask: the source is its own masked copy
+              masked = src;
+              haveMask = true;
+            }
+          }
+          // try to settle it within the text before the first maskable character
+          if (!haveMask && pos < trig - 1) res = matchEmphasis(src, pos, rest, src, prev, trig - 1, trig - 1);
         }
-        let closer;
-        if (c === 42) {
-          if (cAst === -2) cAst = lastCloser(masked, 42, '*');
-          closer = cAst;
-        } else {
-          if (cUnd === -2) cUnd = lastCloser(masked, 95, '_');
-          closer = cUnd;
+        if (res === 2) {
+          if (!haveMask) {
+            masked = maskSource(src);
+            haveMask = true;
+          }
+          let closer;
+          if (c === 42) {
+            if (cAst === -2) cAst = lastCloser(masked, 42, '*');
+            closer = cAst;
+          } else {
+            if (cUnd === -2) cUnd = lastCloser(masked, 95, '_');
+            closer = cUnd;
+          }
+          res = matchEmphasis(src, pos, rest, masked, prev, closer, masked.length);
         }
-        if (matchEmphasis(src, pos, src.slice(pos), masked, prev, closer)) {
+        if (res === 1) {
           const kind = rKind;
           adv = rLen;
           const inner = inline(rText, alt);
@@ -1487,19 +1542,35 @@ function inlineRun(src, alt) {
         }
       }
     } else if (c === 126) {
+      const rest = src.slice(pos);
+      let res = 2;
       if (!haveMask) {
-        masked = maskSource(src);
-        haveMask = true;
+        if (trig === -2) {
+          trig = src.search(MASK_TRIGGER_RE);
+          if (trig < 0) {
+            masked = src;
+            haveMask = true;
+          }
+        }
+        if (!haveMask && pos < trig - 1) res = matchDel(src, pos, rest, src, prev, trig - 1, trig - 1);
       }
-      if (cDel === -2) cDel = lastCloser(masked, 126, '~');
-      if (matchDel(src, pos, src.slice(pos), masked, prev, cDel)) {
+      if (res === 2) {
+        if (!haveMask) {
+          masked = maskSource(src);
+          haveMask = true;
+        }
+        if (cDel === -2) cDel = lastCloser(masked, 126, '~');
+        res = matchDel(src, pos, rest, masked, prev, cDel, masked.length);
+      }
+      if (res === 1) {
         adv = rLen;
         const inner = inline(rText, alt);
         piece = alt ? inner : '<del>' + inner + '</del>';
       }
     }
-    if (piece === null && urlish && !sInLink && c < 128 && URL_START[c] === 1) {
-      const m = URL_RE.exec(src.slice(pos));
+    if (piece === null && urlAt <= pos && !sInLink && c < 128 && URL_START[c] === 1) {
+      if (urlAt < pos) urlAt = nextUrlish(src, pos, len);
+      const m = urlAt === pos ? URL_RE.exec(src.slice(pos)) : null;
       if (m !== null) {
         let text;
         let href;
@@ -1532,7 +1603,14 @@ function inlineRun(src, alt) {
       continue;
     }
     // text
-    const end = urlish ? scanTextUrl(src, pos, len) : scanText(src, pos, len);
+    if (urlAt < pos) urlAt = nextUrlish(src, pos, len);
+    let end;
+    if (urlAt > pos) {
+      end = scanText(src, pos, len);
+      if (end >= urlAt) end = scanTextUrl(src, pos, len);
+    } else {
+      end = scanTextUrl(src, pos, len);
+    }
     const raw = src.slice(pos, end);
     if (src.charCodeAt(end - 1) !== 95) prev = src[end - 1];
     keep = true;
