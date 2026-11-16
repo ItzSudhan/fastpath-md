@@ -344,14 +344,20 @@ function pipeRepl(m, off, str) {
   return esc ? '|' : ' |';
 }
 function splitCells(row, count) {
-  const cells = row.replace(PIPE_G_RE, pipeRepl).split(SPLIT_PIPE_RE);
+  // Without a backslash no pipe is escaped: every pipe separates two cells.
+  const plain = row.indexOf('\\') < 0;
+  const cells = plain ? row.split('|') : row.replace(PIPE_G_RE, pipeRepl).split(SPLIT_PIPE_RE);
   if (!cells[0].trim()) cells.shift();
   if (cells.length > 0 && !cells[cells.length - 1].trim()) cells.pop();
   if (count) {
     if (cells.length > count) cells.splice(count);
     else while (cells.length < count) cells.push('');
   }
-  for (let i = 0; i < cells.length; i++) cells[i] = cells[i].trim().replace(SLASH_PIPE_RE, '|');
+  if (plain) {
+    for (let i = 0; i < cells.length; i++) cells[i] = cells[i].trim();
+  } else {
+    for (let i = 0; i < cells.length; i++) cells[i] = cells[i].trim().replace(SLASH_PIPE_RE, '|');
+  }
   return cells;
 }
 function fenceText(raw, text) {
@@ -1331,7 +1337,7 @@ function tagCrossesLabel(rest, label, offset) {
 
 // Renders a link or an image around its label; null when the label itself emitted a link.
 function outputLink(label, href, title, image, alt) {
-  const text = label.replace(OUTPUT_LINK_RE, '$1');
+  const text = label.indexOf('\\') < 0 ? label : label.replace(OUTPUT_LINK_RE, '$1');
   const wasInLink = sInLink;
   const wasEmitted = sLinkEmitted;
   const wasRaw = sRaw;
@@ -1390,7 +1396,10 @@ function matchLink(rest, alt) {
   let href = dest.trim();
   let title = titleRaw ? titleRaw.slice(1, -1) : '';
   if (href.charCodeAt(0) === 60) href = href.slice(1, -1);
-  const html = outputLink(m[1], href && href.replace(ANYPUNCT_RE, '$1'), title && title.replace(ANYPUNCT_RE, '$1'), image, alt);
+  // backslash escapes are removed from the destination and the title; most have none
+  if (href.indexOf('\\') >= 0) href = href.replace(ANYPUNCT_RE, '$1');
+  if (title.indexOf('\\') >= 0) title = title.replace(ANYPUNCT_RE, '$1');
+  const html = outputLink(m[1], href, title, image, alt);
   if (html === null) return 0;
   rText = html;
   return whole.length;
@@ -1688,7 +1697,7 @@ function inlineRun(src, alt) {
     } else if (c === 96) {
       const m = CODESPAN_RE.exec(src.slice(pos));
       if (m !== null) {
-        let text = m[2].replace(NL_G_RE, ' ');
+        let text = m[2].indexOf('\n') < 0 ? m[2] : m[2].replace(NL_G_RE, ' ');
         if (NON_SPACE_RE.test(text) && text.charCodeAt(0) === 32 && text.charCodeAt(text.length - 1) === 32) text = text.substring(1, text.length - 1);
         piece = alt ? text : '<code>' + escAll(text) + '</code>';
         adv = m[0].length;

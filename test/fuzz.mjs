@@ -4,6 +4,7 @@
 //   node test/fuzz.mjs url   [seed] [count]   short strings made of the parts of links and addresses
 //   node test/fuzz.mjs emph  [seed] [count]   short strings made of emphasis delimiters and their neighbours
 //   node test/fuzz.mjs para  [seed] [count]   a few lines that start like blocks or like inline content
+//   node test/fuzz.mjs table [seed] [count]   small tables with pipes, escapes and code in their cells
 import { diff, show, minimise, rng, examples, drawDocuments } from './lib.mjs';
 
 const mode = process.argv[2] ?? 'mut';
@@ -129,6 +130,23 @@ function para() {
   return s;
 }
 
+const CELL_PARTS = ['a', 'b', ' ', ' ', '|', '|', '|', '\\|', '\\', '\\\\|', '`|`', '*b*', '  ', ':', '-', 'x', '\t', 'é', '[l](u)', '\\\\', '| ', ' |', '||'];
+const DELIM_ROWS = ['|---|---|', '|-|-|', '---|---', '|:-|-:|', '| :-: | --- |', '-|-', '|---|', '---', '|--|--|--|', ':-|:-:', '| - | - |', '|-|-|\\'];
+function table() {
+  const row = () => {
+    const n = 1 + rand.int(9);
+    let s = '';
+    for (let i = 0; i < n; i++) s += rand.pick(CELL_PARTS);
+    return s;
+  };
+  let s = row() + '\n' + rand.pick(DELIM_ROWS);
+  const rows = rand.int(4);
+  for (let i = 0; i < rows; i++) s += '\n' + row();
+  if (rand.int(5) === 0) s = 'text\n' + s;
+  if (rand.int(5) === 0) s += '\n\nafter';
+  return s;
+}
+
 let pool = [];
 if (mode === 'mut') {
   const docs = await drawDocuments(1000 + seed, 6);
@@ -147,7 +165,7 @@ if (mode === 'mut') {
 let bad = 0;
 let skipped = 0;
 for (let i = 0; i < count; i++) {
-  const md = mode === 'mut' ? mutate(rand.pick(pool), pool) : mode === 'url' ? urls() : mode === 'emph' ? emph() : mode === 'para' ? para() : dense();
+  const md = mode === 'mut' ? mutate(rand.pick(pool), pool) : mode === 'url' ? urls() : mode === 'emph' ? emph() : mode === 'para' ? para() : mode === 'table' ? table() : dense();
   let d;
   try {
     d = diff(md);

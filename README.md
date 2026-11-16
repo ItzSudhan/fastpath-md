@@ -10,7 +10,13 @@ fastpath-md is a Markdown renderer written for the make.fun bounty "Make Markdow
 
 The parser follows marked's algorithm, because the output has to match marked's code unit for code unit, including where marked departs from the CommonMark and GFM specs. It works in three passes. The block pass walks the normalised source, looks at the first character of each block to decide which of marked's block rules can apply at all, and produces light tokens of a single shape while collecting link reference definitions and queueing inline sources. Runs of ordinary paragraph lines are found by a hand-written line scanner; everything rare or intricate still goes through marked's own rule expression. The inline pass runs once the whole document's definitions are known: it returns at once for sources with no special character, otherwise dispatches on the character at the cursor, scans plain text by hand up to the next character at which a rule could match, and builds the masked copy of the source used for emphasis only when a delimiter is actually tried. It writes HTML strings directly instead of building inline tokens. The render pass concatenates the block tokens' strings.
 
+A run of the grader lasts a fraction of a second, so most of the code never leaves V8's baseline tiers. The parser is tuned for that: the long scans (the end of a run of text, the next line end, the last delimiter) are left to native string searches and simple regular expressions, emphasis is settled by hand for ASCII text and without building the masked copy when it closes before any link, code span or tag, and each finished document is flattened to one string at once so that the pieces it was built from do not burden the garbage collector.
+
 Nothing is kept between calls: every call resets the parser's state, and there is no table of inputs or outputs, only character class tables and precompiled regular expressions.
+
+## Runtime settings
+
+This variant of `main.ts` uses no runtime settings: it runs with V8's defaults.
 
 ## Running it
 
@@ -32,9 +38,13 @@ node test/practice.mjs              # the 720 practice cases
 node test/fresh.mjs 1 10            # 10 fresh sets of 40 documents drawn with the kit's generator
 node test/fuzz.mjs mut 1 40000      # seeded mutations of generated documents and spec examples
 node test/fuzz.mjs dense 1 60000    # seeded short strings made mostly of special characters
+node test/fuzz.mjs url 1 40000      # the parts of links and addresses
+node test/fuzz.mjs emph 1 100000    # emphasis delimiters and their neighbours
+node test/fuzz.mjs para 1 100000    # lines that start like blocks or like inline content
+node test/fuzz.mjs table 1 50000    # small tables with pipes, escapes and code in their cells
 ```
 
-A failing fuzz case is minimised and printed with the offset where the two outputs first differ.
+A failing fuzz case is minimised and printed with the offset where the two outputs first differ. `node test/bench.mjs 11 ours="node main.ts" marked="node ../markdown-render-speed-02-kit/baselines/main.ts"` compares the CPU time of whole runs on the practice set, variants interleaved.
 
 ## Licence
 
