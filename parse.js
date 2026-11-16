@@ -171,6 +171,9 @@ const EMAIL_CH = new Uint8Array(128);
 // What a character means to the text scanners: 0 nothing, 1 the text rule stops, 2 a space,
 // 3 h, 4 f, 5 w, 6 m or x (the starts of url-like constructs), 7 an at sign.
 const TEXT_CLASS = new Uint8Array(128);
+// How a character next to a delimiter run counts: 1 white space, 2 punctuation, 3 anything else.
+const DELIM_CLASS_AST = new Uint8Array(128);
+const DELIM_CLASS_UND = new Uint8Array(128);
 // 1 for ASCII white space and punctuation other than * and _ (marked's punctuation rule).
 const PUNCT_SPACE = new Uint8Array(128);
 {
@@ -182,6 +185,10 @@ const PUNCT_SPACE = new Uint8Array(128);
   TEXT_CLASS[119] = 5;
   TEXT_CLASS[109] = TEXT_CLASS[120] = 6;
   TEXT_CLASS[64] = 7;
+  for (let c = 0; c < 128; c++) DELIM_CLASS_AST[c] = DELIM_CLASS_UND[c] = 3;
+  for (const ch of '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~') DELIM_CLASS_AST[ch.charCodeAt(0)] = DELIM_CLASS_UND[ch.charCodeAt(0)] = 2;
+  DELIM_CLASS_AST[126] = 3; // for asterisks marked counts a tilde with the ordinary characters
+  for (const c of [9, 10, 11, 12, 13, 32]) DELIM_CLASS_AST[c] = DELIM_CLASS_UND[c] = 1;
   for (const c of [9, 10, 11, 12, 13, 32]) PUNCT_SPACE[c] = 1;
   for (const ch of '!"#$%&\'()+,-./:;<=>?@[\\]^`{|}~') PUNCT_SPACE[ch.charCodeAt(0)] = 1;
   for (let c = 48; c < 58; c++) ALNUM[c] = EMAIL_CH[c] = 1;
@@ -364,7 +371,7 @@ function enqueue(src) {
 // ---------------------------------------------------------------------------------------------
 
 // The end of a run of plain lines starting at `pos`, or -1 when a following line needs the rules.
-function scanPlainLines(src, pos, len) {
+function scanPlainLines(src, pos, len, top) {
   let i = pos;
   for (;;) {
     const nl = src.indexOf('\n', i);
@@ -373,9 +380,27 @@ function scanPlainLines(src, pos, len) {
     if (q >= len) return nl;
     const c = src.charCodeAt(q);
     if (c === 10) return nl;
-    if (c < 128 && CONT_UNSAFE[c] === 1) return -1;
+    if (c < 128 && CONT_UNSAFE[c] === 1 && !(top && inlineStart(src, q, len, c))) return -1;
     i = q;
   }
+}
+
+// Whether a paragraph's following line that starts at `q` with the marker character `c` is
+// certainly inline content: none of the constructs that interrupt a paragraph can start there.
+function inlineStart(src, q, len, c) {
+  if (c === 91) return true; // no interrupting construct starts with a bracket
+  if (q + 2 >= len) return false;
+  const d = src.charCodeAt(q + 1);
+  if (c === 96 || c === 126) return d !== c || src.charCodeAt(q + 2) !== c; // not a fence
+  if (c >= 48 && c <= 57) return c !== 49 || (d !== 46 && d !== 41); // not "1." or "1)"
+  if (c === 42 || c === 95) {
+    // not a bullet and not a thematic break: something other than blanks or the marker follows
+    if (d === 32 || d === 9 || d === 10) return false;
+    if (d !== c) return true;
+    const e = src.charCodeAt(q + 2);
+    return e !== c && e !== 32 && e !== 9 && e !== 10;
+  }
+  return false;
 }
 
 // Whether a setext underline could follow within the lines up to the next blank one.
@@ -455,7 +480,7 @@ function blockTokens(src, toks, lazy) {
       }
     }
     if (!ws && (c > 127 || PARA_START[c] === 1)) {
-      const end = scanPlainLines(src, pos, len);
+      const end = scanPlainLines(src, pos, len, gTop);
       if (end >= 0) {
         const chunk = src.slice(pos, end);
         if (gTop) {
@@ -1041,6 +1066,75 @@ function isAlnum(s) {
   return c < 128 ? ALNUM[c] === 1 : ALNUM_U_RE.test(s);
 }
 
+// Results of closeAscii: where the closing run starts in the tail, and how much of it is used.
+let qHead = 0;
+let qRun = 0;
+
+// The search for the closing delimiter run, done by hand for tails whose delimiter runs have
+// ASCII neighbours and that do not hold the other delimiter character. It walks the runs the way
+// marked's closing-delimiter expression finds them: each run is classed by the character before
+// it and the one after (white space, punctuation, or anything else) as closing only (1), opening
+// only (2), both (3) or neither (0), and the counts are kept as marked keeps them.
+// Returns 1 with qHead and qRun set, -1 when there is no closer, -2 when it cannot tell (the
+// expression is used instead), -3 when a bounded tail ended before the answer was certain.
+function closeAscii(tail, delim, lLength, openRun, leftBoth, sameAsPrev, limit, bounded) {
+  const ast = delim === 42;
+  const cls = ast ? DELIM_CLASS_AST : DELIM_CLASS_UND;
+  const ch = ast ? '*' : '_';
+  // The expression's first alternative needs a pair of the other delimiter before the first
+  // run of this one; elsewhere the other delimiter is plain punctuation.
+  const first = tail.indexOf(ch);
+  if (first < 0) return -1;
+  const other = tail.indexOf(ast ? '_' : '*');
+  if (other >= 0 && other < first) return -2;
+  const n = tail.length;
+  let delimTotal = lLength;
+  let midDelimTotal = 0;
+  let i = 0;
+  for (;;) {
+    const r = tail.indexOf(ch, i);
+    if (r < 0) return -1;
+    let e = r + 1;
+    while (e < n && tail.charCodeAt(e) === delim) e++;
+    if (r === i) {
+      // a run with nothing before it is never matched
+      i = e;
+      continue;
+    }
+    if (e >= n && bounded) return -3;
+    const c0 = tail.charCodeAt(r - 1);
+    const n0 = e < n ? tail.charCodeAt(e) : 32;
+    if (c0 > 127 || n0 > 127) return -2;
+    if (r - 1 > limit) return -1;
+    const a = cls[c0];
+    const b = cls[n0];
+    // kind: 0 no match, 1 closes, 2 opens, 3 both
+    let kind;
+    if (a === 1) kind = b === 1 ? 0 : 2;
+    else if (a === 2) kind = b === 1 ? 1 : b === 2 ? 3 : 2;
+    else kind = b === 3 ? (ast ? 3 : 0) : 1;
+    i = e;
+    if (kind === 0) continue;
+    let rLength = e - r;
+    if (kind === 2) {
+      delimTotal += rLength;
+      continue;
+    }
+    if (kind === 3 || leftBoth) {
+      if (sameAsPrev && kind === 3) return -1;
+      if (openRun % 3 && !((openRun + rLength) % 3)) {
+        midDelimTotal += rLength;
+        continue;
+      }
+    }
+    delimTotal -= rLength;
+    if (delimTotal > 0) continue;
+    qHead = r;
+    qRun = Math.min(rLength, rLength + delimTotal + midDelimTotal);
+    return 1;
+  }
+}
+
 // Emphasis and strong emphasis at `pos`; true with rLen, rKind (1 em, 2 strong) and rText set.
 function matchEmphasis(src, pos, rest, masked, prev, closer, bound) {
   let m = EM_LDELIM_RE.exec(rest);
@@ -1084,6 +1178,21 @@ function matchEmphasis(src, pos, rest, masked, prev, closer, bound) {
       tail = masked.slice(start);
     }
     const limit = closer - start;
+    const quick = closeAscii(tail, delim, lLength, openRun, leftBoth, sameAsPrev, limit, bounded);
+    if (quick !== -2) {
+      if (quick === -1) return bounded ? 2 : 0;
+      if (quick === -3) return 2;
+      const raw = rest.slice(0, lLength + qHead + qRun);
+      rLen = raw.length;
+      if (Math.min(lLength, qRun) % 2) {
+        rKind = 1;
+        rText = raw.slice(1, -1);
+      } else {
+        rKind = 2;
+        rText = raw.slice(2, -2);
+      }
+      return 1;
+    }
     re.lastIndex = 0;
     while ((m = re.exec(tail)) !== null && !(m.index > limit)) {
       const run = m[1] || m[2] || m[3] || m[4] || m[5] || m[6];

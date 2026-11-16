@@ -2,6 +2,8 @@
 //   node test/fuzz.mjs mut   [seed] [count]   mutations of generated documents and spec examples
 //   node test/fuzz.mjs dense [seed] [count]   short strings made mostly of special characters
 //   node test/fuzz.mjs url   [seed] [count]   short strings made of the parts of links and addresses
+//   node test/fuzz.mjs emph  [seed] [count]   short strings made of emphasis delimiters and their neighbours
+//   node test/fuzz.mjs para  [seed] [count]   a few lines that start like blocks or like inline content
 import { diff, show, minimise, rng, examples, drawDocuments } from './lib.mjs';
 
 const mode = process.argv[2] ?? 'mut';
@@ -100,6 +102,33 @@ function urls() {
   return s;
 }
 
+const EMPH_PARTS = ['*', '*', '*', '**', '_', '_', '__', '~', '~~', ' ', ' ', 'a', 'b', 'c', '.', ',', '(', ')', '"', '\n', 'é', '-', '!', '?',
+  '***', '___', 'a*', '*a', '_a', 'a_', ' *', '* ', ' _', '_ ', '`', '[', ']', '\\', '<', '>', '](u)', '[x]', '`c`', '<b>', '\\*', '\\_', '😀', ' ', '+', '&', '1', '\t'];
+function emph() {
+  const n = 1 + rand.int(22);
+  let s = '';
+  for (let i = 0; i < n; i++) s += rand.pick(EMPH_PARTS);
+  if (rand.int(8) === 0) s = '[x]: /u\n\n' + s;
+  return s;
+}
+
+const LINES = ['`a`', '``', '```', '````x', '~', '~~a~~', '~~~', '[a]', '[a]: /u', '1', '1.', '1. a', '1) a', '12. a', '2. a', '10', '*', '* a',
+  '*a*', '**a**', '***', '** *', '* * *', '_a_', '__a__', '___', '_ _ _', '__', '**', '*\t', 'a', 'b c', 'a', 'text', '', ' ', '  a', '    a', '-', '- a',
+  '---', '===', '=', '| a |', '|-|', ':-', '#', '# a', '>', '> a', '<b>', '<div>', '+', '+ a', 'é', '\t', '1.a', '*a', '_a', '`', '``` a', '~~~a', '[', ']',
+  '1)', '0. a', '*  a', '_', '**a', '__a', '*_', '_*', '`` ` ``', '~~', '1.\ta', '*\ta', '_\t_', '** a', '__ a', '9) a', '[a](b)', '![a](b)', '`a', '~a'];
+function para() {
+  const n = 2 + rand.int(6);
+  const lines = [];
+  for (let i = 0; i < n; i++) lines.push(rand.pick(LINES));
+  let s = lines.join('\n');
+  const wrap = rand.int(8);
+  if (wrap === 0) s = '- ' + s.replace(/\n/g, '\n  ');
+  else if (wrap === 1) s = '> ' + s.replace(/\n/g, '\n> ');
+  else if (wrap === 2) s = '1. ' + s.replace(/\n/g, '\n   ');
+  if (rand.int(4) === 0) s += '\n';
+  return s;
+}
+
 let pool = [];
 if (mode === 'mut') {
   const docs = await drawDocuments(1000 + seed, 6);
@@ -118,7 +147,7 @@ if (mode === 'mut') {
 let bad = 0;
 let skipped = 0;
 for (let i = 0; i < count; i++) {
-  const md = mode === 'mut' ? mutate(rand.pick(pool), pool) : mode === 'url' ? urls() : dense();
+  const md = mode === 'mut' ? mutate(rand.pick(pool), pool) : mode === 'url' ? urls() : mode === 'emph' ? emph() : mode === 'para' ? para() : dense();
   let d;
   try {
     d = diff(md);
