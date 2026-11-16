@@ -16,7 +16,7 @@ Nothing is kept between calls: every call resets the parser's state, and there i
 
 ## Runtime settings
 
-This variant of `main.ts` uses no runtime settings: it runs with V8's defaults.
+`main.ts` sets one V8 flag with `setFlagsFromString` before it loads the parser: `--no-opt`, which switches off the optimising compiler. In a run this short the compiler costs more CPU than its code saves. The flag changes how the code is compiled, never what it computes: the output is byte for byte the same with and without it. The commit "Variant A" in the history is the same parser with no runtime settings.
 
 ## Running it
 
